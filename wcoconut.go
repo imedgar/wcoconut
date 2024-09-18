@@ -3,9 +3,9 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"slices"
 	"strings"
@@ -13,97 +13,114 @@ import (
 	"unicode/utf8"
 )
 
-const invOpt = "invalid option. usage wcoconut [-c -l -w -m] file"
+const (
+	usage           = "usage: wcoconut [-c -l -w -m] file"
+	timeoutDuration = 100 * time.Millisecond
+)
 
 var (
-	path      string
-	data      []byte
-	validOpts = []string{"-c", "-l", "-w", "-m"}
+	errInvalidOption = errors.New("invalid option")
+	validOpts        = []string{"-c", "-l", "-w", "-m"}
 )
 
 func main() {
-	args := os.Args[1:]
+	if err := run(os.Args[1:], os.Stdin, os.Stdout); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func run(args []string, stdin io.Reader, stdout io.Writer) error {
 	if len(args) < 1 {
-		log.Fatal(invOpt)
+		return fmt.Errorf(usage)
 	}
 
-	path = args[0]
+	opt, path, err := parseArgs(args)
+	if err != nil {
+		return err
+	}
+
+	data, err := readInput(path, stdin)
+	if err != nil {
+		return err
+	}
+	return count(opt, path, data, stdout)
+}
+
+func parseArgs(args []string) (string, string, error) {
+	fArg := args[0]
+	path := ""
+
 	if len(args) == 2 {
 		path = args[1]
+	} else if !isValidOpt(fArg) {
+		path = fArg
+		fArg = ""
 	}
 
-	if isValidOpt(args[0]) {
-		log.Fatal("invalid option ", args[0])
+	if isValidOpt(fArg) {
+		return "", "", fmt.Errorf("%w: %s", errInvalidOption, fArg)
 	}
 
-	input := readStdin()
-	if input != "" {
-		data = []byte(input)
-		path = ""
-	} else {
-		dat, err := os.ReadFile(path)
-		if err != nil {
-			log.Fatal(err)
-		}
-		data = dat
-	}
-	count(args[0])
+	return fArg, path, nil
 }
 
 func isValidOpt(opt string) bool {
-	return len(opt) == 2 && strings.Contains(opt, "-") && !slices.Contains(validOpts, opt)
+	return len(opt) == 2 && strings.HasPrefix(opt, "-") && !slices.Contains(validOpts, opt)
 }
 
-func count(opt string) {
+func readInput(path string, stdin io.Reader) ([]byte, error) {
+	input, err := readStdin(stdin)
+	if err != nil || len(input) == 0 {
+		return os.ReadFile(path)
+	}
+	return input, nil
+}
+
+func count(opt, path string, data []byte, w io.Writer) error {
+	out := path
+	if slices.Contains(validOpts, out) {
+		out = string(data)
+	}
 	switch opt {
 	case "-c":
-		fmt.Println(bytesInFile(), path)
+		fmt.Fprintf(w, "%d %s\n", len(data), out)
 	case "-l":
-		fmt.Println(linesInFile(), path)
+		fmt.Fprintf(w, "%d %s\n", linesInFile(data), out)
 	case "-w":
-		fmt.Println(wordsInFile(), path)
+		fmt.Fprintf(w, "%d %s\n", wordsInFile(data), out)
 	case "-m":
-		fmt.Println(utf8.RuneCount(data), path)
+		fmt.Fprintf(w, "%d %s\n", utf8.RuneCount(data), out)
 	default:
-		fmt.Println(linesInFile(), wordsInFile(), bytesInFile(), path)
+		fmt.Fprintf(w, "%d %d %d %s\n", linesInFile(data), wordsInFile(data), len(data), out)
 	}
+	return nil
 }
 
-func bytesInFile() int {
-	return len(data)
+func linesInFile(data []byte) int {
+	return bytes.Count(data, []byte{'\n'})
 }
 
-func linesInFile() int {
-	return len(strings.Split(string(data), "\n")) - 1
-}
-
-func wordsInFile() int {
+func wordsInFile(data []byte) int {
 	return len(bytes.Fields(data))
 }
 
-func readStdin() string {
+func readStdin(r io.Reader) ([]byte, error) {
 	var input strings.Builder
-	reader := bufio.NewReader(os.Stdin)
-
 	done := make(chan struct{})
+
 	go func() {
-		for {
-			line, err := reader.ReadString('\n')
-			if err != nil {
-				if err != io.EOF {
-					log.Fatal(err)
-				}
-				break
-			}
-			input.WriteString(line)
+		scanner := bufio.NewScanner(r)
+		for scanner.Scan() {
+			input.WriteString(scanner.Text() + "\n")
 		}
 		close(done)
 	}()
 
 	select {
 	case <-done:
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(timeoutDuration):
 	}
 
-	return strings.TrimSpace(input.String())
+	return []byte(strings.TrimSpace(input.String())), nil
 }
